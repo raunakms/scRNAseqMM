@@ -1,0 +1,193 @@
+---
+title: "Normalization using Seurat"
+
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+  html_notebook:
+    number_sections: yes
+    toc: yes
+
+knit: (function(input_file, encoding) {
+  out_dir <- '../html';
+  rmarkdown::render(input_file,
+ encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, '01_01_data_normalization_seurat.html'))})
+---
+
+
+#### Define Libraries
+```{r echo=TRUE, message=FALSE, warning=FALSE, tidy=TRUE}
+library("stringr")
+library("ggplot2")
+library("Seurat")
+library("tidyverse")
+library("RColorBrewer")
+```
+
+#### Define Global Path
+```{r tidy=TRUE}
+dir.wrk <- str_replace(getwd(), "/scripts", "")
+dir.data <- file.path(dir.wrk, "data/scRNAseq-afterCellRanger/filtered")
+dir.des <- file.path(dir.wrk, "data/design")
+dir.output <- file.path(dir.wrk, "data/processed_data")
+```
+
+
+#### Get Count Matrix
+```{r}
+#dirs.batch <- list.dirs(dir.data, full.names = TRUE, recursive = FALSE)
+
+# FUNCTION: myRead10X() ---
+myRead10X <- function(dir.data, sampleid) {
+  Read10X(data.dir = file.path(dir.data, sampleid))
+}
+
+# Load Sparse Matrix ---
+sp.mat <- myRead10X(dir.data, sampleid="0661-2_CD138Plus")
+
+# Initialize the Seurat object with the raw (non-normalized data) ---
+mm.obj <- CreateSeuratObject(counts = sp.mat, 
+                             min.cells = 3,
+                             min.features = 100, 
+                             project = "0661-2_CD138Plus")
+```
+
+
+#### Get mitochondrial genes stats
+```{r}
+mm.mito.genes <- grep(pattern = "^MT-", x = rownames(x = mm.obj@assays$RNA@data), value = TRUE)
+mm.percent.mito <- Matrix::colSums(mm.obj@assays$RNA@data[mm.mito.genes, ]) / Matrix::colSums(mm.obj@assays$RNA@data)
+
+mm.obj <- AddMetaData(object = mm.obj, metadata = mm.percent.mito,col.name = "percent.mito")
+
+grep("^MT-", rownames(mm.obj@assays$RNA@data), value = TRUE)
+```
+
+
+#### Get QC metrics
+```{r}
+plot0 <- VlnPlot(object = mm.obj, features= c("nFeature_RNA", "nCount_RNA", "percent.mito"), cols=3)
+plot0
+
+plot1 <- FeatureScatter(mm.obj, feature1 = "nCount_RNA", feature2 = "percent.mito")
+plot2 <- FeatureScatter(mm.obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+#CombinePlots(plots = list(plot1, plot2))
+plot1
+plot2
+```
+
+
+
+#### Filter based on QC metrics
+```{r}
+mm.obj <- subset(mm.obj, subset = nFeature_RNA > 200 & nFeature_RNA < 3500 & percent.mito < 0.1)
+
+plot0 <- VlnPlot(object = mm.obj, features= c("nFeature_RNA", "nCount_RNA", "percent.mito"), cols=3)
+plot0
+
+plot1 <- FeatureScatter(mm.obj, feature1 = "nCount_RNA", feature2 = "percent.mito")
+plot2 <- FeatureScatter(mm.obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+#CombinePlots(plots = list(plot1, plot2))
+plot1
+plot2
+```
+
+
+#### Normalizing the data
+```{r}
+mm.obj <- NormalizeData(mm.obj, normalization.method = "LogNormalize", scale.factor = 10000)
+
+expr <- mm.obj[["RNA"]]@data
+
+# Normalized Expression Data can be found in 
+#mm.obj[["RNA"]]@data[1:10,1:10]
+```
+
+#### WRITE OUTPUT 
+```{r}
+#file.expr <- file.path(dir.output, "normalized_expr_0661-2_CD138Plus.tsv")
+#write.table(expr, file.expr, sep="\t", row.names=TRUE, col.names=NA, quote=FALSE)
+```
+
+
+#### Identification of highly variable features (feature selection)
+```{r}
+mm.obj <- FindVariableFeatures(mm.obj, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(mm.obj), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(mm.obj)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+
+plot1
+plot2
+#CombinePlots(plots = list(plot1, plot2))
+```
+
+
+#### Scale Data 
+```{r}
+all.genes <- rownames(mm.obj)
+mm.obj <- ScaleData(mm.obj, features = all.genes)
+
+expr.scale <- mm.obj[["RNA"]]@scale.data
+```
+
+#### Perform linear dimensional reduction
+```{r}
+mm.obj <- RunPCA(mm.obj, features = VariableFeatures(object = mm.obj))
+```
+
+#### Visualize PCA Features
+```{r}
+VizDimLoadings(mm.obj, dims = 1:2, reduction = "pca")
+DimPlot(mm.obj, reduction = "pca")
+```
+
+#### PCA Feature Heatmaps
+```{r fig.width=8, fig.height=8}
+DimHeatmap(mm.obj, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+#### Determine 'dimentionality' of the dataset
+```{r}
+mm.obj <- JackStraw(mm.obj, num.replicate = 100)
+mm.obj <- ScoreJackStraw(mm.obj, dims = 1:20)
+
+### JackStraw PLOT
+JackStrawPlot(mm.obj, dims = 1:20)
+
+### Elbow Plot
+ElbowPlot(mm.obj)
+```
+
+
+
+#### Cluster cells
+```{r}
+mm.obj <- FindNeighbors(mm.obj, dims = 1:10)
+mm.obj <- FindClusters(mm.obj, resolution = 0.5)
+
+# Look at cluster IDs of the first 5 cells
+head(Idents(mm.obj), 5)
+```
+
+
+#### Run Non-dimentional Reduction (tSNE)
+```{r}
+mm.obj <- RunTSNE(object = mm.obj, dims.use = 1:15)
+```
+
+#### PLOT t-SNE
+```{r fig.width=5, fig.height=5}
+# COLOR PALETTE ---
+jColFun <- colorRampPalette(brewer.pal(n = 9, "Set1"))
+
+# note that you can set do.label=T to help label individual clusters
+#TSNEPlot(object = hgg.obj, pt.size = 3, cols=jColFun(8))
+DimPlot(object = mm.obj, pt.size = 3, cols=jColFun(12))
+```
